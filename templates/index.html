@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HotelBot - Find Hotels Instantly</title>
+    <meta name="description" content="HotelBot helps you search and filter hotels in any city using natural language.">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body class="bg-gray-100 font-sans">
+
+    <!-- Full-Page Flex Centered Layout -->
+    <div class="w-full max-w-screen-sm mx-auto flex flex-col h-screen bg-white rounded-lg shadow-lg overflow-hidden">
+
+        <!-- Chatbot Title -->
+        <div class="bg-blue-600 p-4 text-white text-3xl font-semibold text-center">
+            <h2>🏨 HotelBot</h2>
+        </div>
+
+        <!-- Chat Box -->
+        <div id="chat-box" class="flex-1 overflow-y-auto p-6 bg-gray-50 space-y-4">
+            <!-- Messages will appear here -->
+        </div>
+
+        <!-- Input and Send Button -->
+        <div class="flex items-center p-4 bg-white border-t-2 border-gray-200">
+            <input type="text" id="user-input"
+                class="w-full p-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg"
+                placeholder="Type your message...">
+            <button onclick="sendMessage()"
+                class="bg-blue-600 text-white p-3 rounded-lg ml-4 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg">
+                Send
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // Function to add a message to the chat box
+        function addMessage(sender, message) {
+            const chatBox = document.getElementById("chat-box");
+            const msg = document.createElement("div");
+            msg.classList.add(sender);
+            msg.classList.add("mb-4", "p-4", "rounded-lg", "max-w-xs", "text-lg", "shadow-md", "break-words");
+
+            // Style for the user's message
+            if (sender === "user") {
+                msg.classList.add("bg-blue-100", "ml-auto", "text-right", "self-end");
+                msg.textContent = "You: " + message;
+            }
+            // Style for the bot's message
+            else {
+                msg.classList.add("bg-gray-200", "text-left", "self-start");
+                // Use innerHTML so \n renders as <br> line breaks
+                const escaped = message
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;");
+                msg.innerHTML = "<strong>Bot:</strong> " + escaped.replace(/\n/g, "<br>");
+            }
+
+            chatBox.appendChild(msg);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        // Function to send the message to the server and get a response
+        async function sendMessage() {
+            const input = document.getElementById("user-input");
+            const btn   = document.querySelector("button");
+            const message = input.value.trim();
+            if (!message) return;
+
+            // Display the user's message
+            addMessage("user", message);
+            input.value = "";
+
+            // Show loading state while waiting for server
+            btn.disabled = true;
+            btn.textContent = "...";
+
+            try {
+                // Send the message to the backend
+                const res = await fetch("/chat", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ message })
+                });
+
+                if (!res.ok) {
+                    addMessage("bot", "Server error (" + res.status + "). Please try again.");
+                    return;
+                }
+
+                // Get the response from the bot and display it
+                const data = await res.json();
+                addMessage("bot", data.reply || "No response from server.");
+            } catch (err) {
+                // Network error or server unreachable
+                addMessage("bot", "Could not reach the server. Please check your connection and try again.");
+            } finally {
+                btn.disabled = false;
+                btn.textContent = "Send";
+            }
+        }
+
+        // Add an event listener to send message on Enter key press
+        document.getElementById("user-input").addEventListener("keypress", function (event) {
+            if (event.key === "Enter") {
+                event.preventDefault();  // Prevent form submission if inside a form
+                sendMessage();  // Call sendMessage when Enter is pressed
+            }
+        });
+
+        // Show welcome message when page loads
+        window.addEventListener("DOMContentLoaded", function () {
+            addMessage("bot", "Hello! \ud83d\udc4b I'm HotelBot. Ask me to find hotels in any city!\nExample: \"show me hotels in Mumbai\"");
+        });
+    </script>
+
+</body>
+
+</html>
