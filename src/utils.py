@@ -1,113 +1,115 @@
-# src/utils.py - Shared utility functions for the chatbot
+"""
+utils.py  –  Filtering and sorting helpers for hotel results.
 
-import re
+Works with the normalized hotel dicts produced by hotel_search.search_hotels():
+  {
+      "hotel_name":             str,
+      "review_score":           float | None,
+      "min_total_price":        float | None,
+      "price_formatted":        str,
+      "currencycode":           str,
+      "address":                str | None,
+      "accommodation_type_name": str,
+      "distance":               None,   ← Hotels.com v3 API does not supply this
+      "hotel_id":               str,
+  }
+"""
 
-def apply_filters(user_input, hotels):
-    """
-    Apply various filters to hotel results based on user input.
-    
-    Supports:
-    - "sort by price" - Sort by price ascending
-    - "sort by rating" - Sort by rating descending
-    - "within X km" - Filter by distance
-    - "price between X and Y" - Filter by price range
-    
-    Args:
-        user_input (str): User's filter request
-        hotels (list): List of hotel dictionaries
-    
-    Returns:
-        list: Filtered hotel list
-    """
-    if "sort by price" in user_input:
-        def _price_key(h):
-            p = h.get("min_total_price")
-            try:
-                return float(p) if p is not None else float('inf')
-            except (ValueError, TypeError):
-                return float('inf')
-        hotels = sorted(hotels, key=_price_key)
-    elif "sort by rating" in user_input:
-        hotels = sorted(hotels, key=lambda x: x.get("review_score") or 0, reverse=True)
-    elif "within" in user_input:
-        distance_match = re.search(r"within ([\d.]+) ?km", user_input)
-        if distance_match:
-            max_distance = float(distance_match.group(1))
-            def safe_distance(h):
-                d = h.get("distance")
-                try:
-                    return float(d) if d is not None else float('inf')
-                except (ValueError, TypeError):
-                    return float('inf')
-            hotels = [h for h in hotels if safe_distance(h) <= max_distance]
-    elif "price between" in user_input:
-        price_match = re.search(r"price between ([\d.]+) and ([\d.]+)", user_input)
-        if price_match:
-            min_price = float(price_match.group(1))
-            max_price = float(price_match.group(2))
-            def safe_price(h):
-                p = h.get("min_total_price")
-                try:
-                    return float(p) if p is not None else 0.0
-                except (ValueError, TypeError):
-                    return 0.0
-            hotels = [h for h in hotels if min_price <= safe_price(h) <= max_price]
-    return hotels
+from __future__ import annotations
 
 
-def get_hotel_details(user_input, hotels):
-    """
-    Extract and return detailed information about a specific hotel.
-    
-    User can ask: "tell me more about [hotel name]"
-    
-    Args:
-        user_input (str): User's request
-        hotels (list): List of hotel dictionaries
-    
-    Returns:
-        str: Formatted hotel details or None if not found
-    """
-    match = re.search(r"(?:tell me more about|more details about|more about) (.+)", user_input)
-    if match:
-        name_query = match.group(1).strip().lower()
-        for hotel in hotels:
-            if name_query in hotel.get("hotel_name", "").lower():
-                details = f"🏨 {hotel.get('hotel_name', 'N/A')}\n"
-                details += f"⭐ Rating: {hotel.get('review_score', 'N/A')}\n"
-                price = hotel.get("min_total_price", 'N/A')
-                if isinstance(price, (float, int)):
-                    price = f"{price:.2f}"
-                details += f"💸 Price: {price} {hotel.get('currencycode', '')}\n"
-                details += f"🏷️ Type: {hotel.get('accommodation_type_name', 'N/A')}\n"
-                details += f"📍 Address: {hotel.get('address', 'N/A')}\n"
-                details += f"📏 Distance: {hotel.get('distance', 'N/A')} km\n"
-                return details
-    return None
+# ──────────────────────────────────────────────────────────────
+# Sorting
+# ──────────────────────────────────────────────────────────────
+
+def sort_by_price(hotels: list[dict]) -> list[dict]:
+    """Return hotels sorted lowest price first. Hotels with no price go last."""
+    return sorted(
+        hotels,
+        key=lambda h: (h.get("min_total_price") is None, h.get("min_total_price") or 0),
+    )
 
 
-def format_hotel_response(city, hotels):
+def sort_by_rating(hotels: list[dict]) -> list[dict]:
+    """Return hotels sorted highest rating first. Hotels with no rating go last."""
+    return sorted(
+        hotels,
+        key=lambda h: (h.get("review_score") is None, -(h.get("review_score") or 0)),
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# Filtering
+# ──────────────────────────────────────────────────────────────
+
+def filter_by_price(hotels: list[dict], min_price: float, max_price: float) -> list[dict]:
+    """Return only hotels whose price falls within [min_price, max_price]."""
+    results = []
+    for h in hotels:
+        price = h.get("min_total_price")
+        if price is not None and min_price <= price <= max_price:
+            results.append(h)
+    return results
+
+
+def filter_by_rating(hotels: list[dict], min_rating: float) -> list[dict]:
+    """Return only hotels whose guest rating is >= min_rating."""
+    return [
+        h for h in hotels
+        if (h.get("review_score") or 0) >= min_rating
+    ]
+
+
+def filter_by_distance(hotels: list[dict], max_km: float) -> list[dict]:
     """
-    Format hotel search results into a readable response.
-    
-    Args:
-        city (str): City name
-        hotels (list): List of hotel dictionaries
-    
-    Returns:
-        str: Formatted hotel list response
+    Return only hotels within max_km kilometres of the city centre.
+
+    NOTE: The Hotels.com Provider v3 API does not return distance data, so
+    the 'distance' field is always None. This filter will return *all* hotels
+    and print a warning rather than silently returning an empty list.
     """
+    filtered = [
+        h for h in hotels
+        if h.get("distance") is not None and h["distance"] <= max_km
+    ]
+    if not filtered:
+        print(
+            f"[utils] ⚠️  Distance filter (≤ {max_km} km) could not be applied — "
+            "the Hotels.com API does not provide distance data. Showing all results instead."
+        )
+        return hotels
+    return filtered
+
+
+# ──────────────────────────────────────────────────────────────
+# Display helper
+# ──────────────────────────────────────────────────────────────
+
+def format_hotel(h: dict, index: int | None = None) -> str:
+    """Return a human-readable string for a single hotel."""
+    prefix = f"{index}. " if index is not None else ""
+    name = h.get("hotel_name", "Unknown")
+    rating = h.get("review_score")
+    rating_str = f"{rating:.1f}/10" if rating is not None else "No rating"
+    price = h.get("price_formatted") or (
+        f"₹{h['min_total_price']:.0f}" if h.get("min_total_price") else "Price unavailable"
+    )
+    address = h.get("address") or "Location not specified"
+    return (
+        f"{prefix}🏨 {name}\n"
+        f"   ⭐ Rating : {rating_str}\n"
+        f"   💰 Price  : {price} / night\n"
+        f"   📍 Area   : {address}"
+    )
+
+
+def format_hotel_list(hotels: list[dict], limit: int = 5) -> str:
+    """Return a formatted list of up to *limit* hotels."""
     if not hotels:
-        return f"Sorry, no hotels were found in {city.title()} matching your criteria. Try broadening your filters."
-    top_hotels = hotels[:5]
-    response = f"Here are the top {len(top_hotels)} hotel(s) in {city.title()}:\n"
-    for hotel in top_hotels:
-        name = hotel.get("hotel_name", "N/A")
-        rating = hotel.get("review_score", "N/A")
-        price = hotel.get("min_total_price", "N/A")
-        currency = hotel.get("currencycode", "")
-        if isinstance(price, (float, int)):
-            price = f"{price:.2f}"
-        response += f"\n🏨 {name}\n⭐ Rating: {rating}\n💸 Price: {price} {currency}\n"
-    response += "\nWould you like to apply more filters? (e.g., sort by rating, within 5 km, price between 1000 and 2000)"
-    return response
+        return "No hotels found matching your criteria."
+    shown = hotels[:limit]
+    lines = [format_hotel(h, i + 1) for i, h in enumerate(shown)]
+    remaining = len(hotels) - len(shown)
+    if remaining > 0:
+        lines.append(f"\n…and {remaining} more hotel(s). Ask me to filter or sort to narrow results.")
+    return "\n\n".join(lines)

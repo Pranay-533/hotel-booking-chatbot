@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: hotel-booking-chatbot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app -w 1
+    envVars:
+      - key: RAPIDAPI_KEY
+        sync: false
+      - key: RAPIDAPI_HOST
+        value: hotels-com-provider.p.rapidapi.com
+      - key: OPENCAGE_KEY
+        sync: false
