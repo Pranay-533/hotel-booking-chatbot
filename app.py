@@ -80,7 +80,7 @@ def handle_message(user_input: str) -> str:
     text = user_input.strip().lower()
     
     if not RAPIDAPI_KEY:
-        return "❌ Error: API Key missing! You need to add `RAPIDAPI_KEY` to your Vercel Environment Variables and redeploy."
+        return "❌ Error: API Key missing! You need to add `RAPIDAPI_KEY` to your Render Environment Variables and redeploy."
 
     # Hotel search
     city = extract_city(user_input)
