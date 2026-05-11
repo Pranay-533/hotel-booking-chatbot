@@ -3,7 +3,7 @@ services:
     name: hotel-booking-chatbot
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app -w 1
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT -w 1
     envVars:
       - key: RAPIDAPI_KEY
         sync: false
@@ -11,3 +11,5 @@ services:
         value: hotels-com-provider.p.rapidapi.com
       - key: OPENCAGE_KEY
         sync: false
+      - key: PORT
+        value: "10000"

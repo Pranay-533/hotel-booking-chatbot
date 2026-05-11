@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HotelBot - Find Hotels Instantly</title>
+    <meta name="description" content="HotelBot helps you search and filter hotels in any city using natural language.">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background: linear-gradient(135deg, #f0fdf4 0%, #dbeafe 100%);
+        }
+
+        /* Custom scrollbar for chat box */
+        #chat-box::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        #chat-box::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        #chat-box::-webkit-scrollbar-thumb {
+            background-color: #cbd5e1;
+            border-radius: 20px;
+        }
+
+        .message-enter {
+            animation: slideUp 0.3s ease-out forwards;
+        }
+
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .bot-msg {
+            background: #ffffff;
+            color: #1e293b;
+            border: 1px solid #e2e8f0;
+            border-bottom-left-radius: 4px;
+        }
+
+        .user-msg {
+            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+            color: #ffffff;
+            border-bottom-right-radius: 4px;
+            box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.3), 0 2px 4px -1px rgba(59, 130, 246, 0.1);
+        }
+    </style>
+</head>
+
+<body class="h-screen w-full flex items-center justify-center p-4 antialiased text-slate-800">
+
+    <!-- App Container -->
+    <div class="w-full max-w-2xl h-[90vh] flex flex-col bg-white/80 backdrop-blur-xl rounded-2xl shadow-2xl border border-white/50 overflow-hidden relative">
+
+        <!-- Header -->
+        <div class="bg-white/90 backdrop-blur-md px-6 py-4 flex items-center justify-between border-b border-slate-100 z-10 shadow-sm relative">
+            <div class="flex items-center space-x-3">
+                <div class="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center shadow-inner text-xl">
+                    🏨
+                </div>
+                <div>
+                    <h2 class="text-xl font-bold text-slate-800 tracking-tight">HotelBot</h2>
+                    <p id="status-indicator" class="text-xs font-medium text-emerald-500 flex items-center">
+                        <span class="w-2 h-2 rounded-full bg-emerald-500 mr-1 animate-pulse"></span> Online
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chat Box -->
+        <div id="chat-box" class="flex-1 overflow-y-auto p-6 space-y-6 bg-slate-50/50 scroll-smooth">
+            <!-- Messages will appear here -->
+        </div>
+
+        <!-- Input Area -->
+        <div class="bg-white px-4 py-4 sm:px-6 border-t border-slate-100 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.02)]">
+            <div class="flex items-center space-x-2 sm:space-x-4">
+                <div class="relative flex-1">
+                    <input type="text" id="user-input"
+                        class="w-full pl-5 pr-12 py-3.5 bg-slate-100/50 border border-slate-200 rounded-full text-slate-700 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 focus:bg-white transition-all shadow-inner"
+                        placeholder="Ask me to find hotels in a city..." autocomplete="off">
+                </div>
+                <button onclick="sendMessage()" id="send-btn"
+                    class="bg-blue-600 hover:bg-blue-700 text-white p-3.5 rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-all shadow-md flex items-center justify-center group disabled:opacity-50 disabled:cursor-not-allowed">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 transform group-hover:translate-x-1 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                    </svg>
+                </button>
+            </div>
+            <div class="mt-2 text-center">
+                 <p class="text-[11px] text-slate-400">Powered by Hotels.com Provider API</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ── Backend URL (Render) ──────────────────────────────────
+        const BACKEND_URL = "https://hotel-booking-chatbot-jd8i.onrender.com";
+
+        const chatBox = document.getElementById("chat-box");
+        const input = document.getElementById("user-input");
+        const sendBtn = document.getElementById("send-btn");
+
+        // Format the message with basic markdown-like support
+        function formatMessageText(text) {
+            let escaped = text
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;");
+            
+            // Bold
+            escaped = escaped.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+            
+            // Italic
+            escaped = escaped.replace(/\*(.*?)\*/g, '<em>$1</em>');
+            
+            // Bullet points
+            escaped = escaped.replace(/^  • /gm, '&nbsp;&nbsp;• ');
+            
+            // New lines
+            escaped = escaped.replace(/\n/g, "<br>");
+            return escaped;
+        }
+
+        // Function to add a message to the chat box
+        function addMessage(sender, message) {
+            const msgWrapper = document.createElement("div");
+            msgWrapper.classList.add("flex", "w-full", "message-enter");
+            
+            const msgBubble = document.createElement("div");
+            msgBubble.classList.add("max-w-[85%]", "sm:max-w-[75%]", "p-4", "rounded-2xl", "text-[15px]", "leading-relaxed");
+
+            if (sender === "user") {
+                msgWrapper.classList.add("justify-end");
+                msgBubble.classList.add("user-msg");
+                msgBubble.innerHTML = formatMessageText(message);
+            } else {
+                msgWrapper.classList.add("justify-start");
+                msgBubble.classList.add("bot-msg", "shadow-sm");
+                
+                // Add an avatar for the bot
+                const avatar = document.createElement("div");
+                avatar.className = "w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center mr-2 flex-shrink-0 mt-1 shadow-inner text-sm";
+                avatar.innerHTML = "🏨";
+                
+                const contentDiv = document.createElement("div");
+                contentDiv.innerHTML = formatMessageText(message);
+                
+                const flexDiv = document.createElement("div");
+                flexDiv.className = "flex items-start";
+                flexDiv.appendChild(avatar);
+                flexDiv.appendChild(contentDiv);
+                
+                msgBubble.appendChild(flexDiv);
+            }
+
+            msgWrapper.appendChild(msgBubble);
+            chatBox.appendChild(msgWrapper);
+            
+            // Smooth scroll to bottom
+            setTimeout(() => {
+                chatBox.scrollTo({
+                    top: chatBox.scrollHeight,
+                    behavior: 'smooth'
+                });
+            }, 10);
+        }
+
+        // Function to send the message to the server and get a response
+        async function sendMessage() {
+            const message = input.value.trim();
+            if (!message) return;
+
+            addMessage("user", message);
+            input.value = "";
+            input.focus();
+
+            sendBtn.disabled = true;
+            sendBtn.innerHTML = `<svg class="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>`;
+
+            try {
+                const res = await fetch(BACKEND_URL + "/chat", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ message })
+                });
+
+                if (!res.ok) {
+                    addMessage("bot", "❌ Server error (" + res.status + "). Please try again.");
+                    return;
+                }
+
+                const data = await res.json();
+                addMessage("bot", data.reply || "No response from server.");
+            } catch (err) {
+                addMessage("bot", "⚠️ Could not reach the server. The backend may be starting up (free tier can take ~30s). Please try again in a moment.");
+            } finally {
+                sendBtn.disabled = false;
+                sendBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 transform group-hover:translate-x-1 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" /></svg>`;
+            }
+        }
+
+        input.addEventListener("keypress", function (event) {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                sendMessage();
+            }
+        });
+
+        window.addEventListener("DOMContentLoaded", function () {
+            setTimeout(() => {
+                addMessage("bot", "Hello! 👋 I'm **HotelBot**. Ask me to find hotels in any city!\n\nTry saying: *\"show me hotels in Mumbai\"* or *\"hotels in Delhi\"*");
+            }, 300);
+        });
+    </script>
+</body>
+
+</html>

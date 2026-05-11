@@ -1,14 +1,14 @@
 """
-app.py  –  Flask web interface for the Hotel Booking Chatbot.
+app.py  –  Flask API backend for the Hotel Booking Chatbot.
 
-Run:
-    python app.py
-Then open http://127.0.0.1:5000 in your browser.
+Deployed on Render. Serves JSON API only (no HTML templates).
+Frontend is deployed separately on Vercel.
 """
 
 import os
 import re
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 from dotenv import load_dotenv
 
 from src.hotel_search import search_hotels
@@ -25,6 +25,7 @@ from src.utils import (
 load_dotenv()
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for Vercel frontend
 
 RAPIDAPI_KEY  = os.getenv("RAPIDAPI_KEY")
 RAPIDAPI_HOST = os.getenv("RAPIDAPI_HOST", "hotels-com-provider.p.rapidapi.com")
@@ -157,7 +158,12 @@ def handle_message(user_input: str) -> str:
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return jsonify({"status": "ok", "service": "HotelBot API", "endpoints": ["/chat", "/health"]})
+
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "healthy"})
 
 
 @app.route("/chat", methods=["POST"])
@@ -171,4 +177,5 @@ def chat():
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
