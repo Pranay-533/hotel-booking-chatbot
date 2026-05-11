@@ -3,6 +3,8 @@ app.py  –  Flask API backend for the Hotel Booking Chatbot.
 
 Deployed on Render. Serves JSON API only (no HTML templates).
 Frontend is deployed separately on Vercel.
+
+Uses OpenCage for geocoding and Overpass API (OpenStreetMap) for hotel data.
 """
 
 import os
@@ -16,6 +18,7 @@ from src.hotel_search import search_hotels
 from src.utils import (
     sort_by_price,
     sort_by_rating,
+    sort_by_distance,
     filter_by_price,
     filter_by_rating,
     filter_by_distance,
@@ -28,8 +31,7 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)  # Enable CORS for Vercel frontend
 
-RAPIDAPI_KEY  = os.getenv("RAPIDAPI_KEY")
-RAPIDAPI_HOST = os.getenv("RAPIDAPI_HOST", "booking-com15.p.rapidapi.com")
+OPENCAGE_KEY = os.getenv("OPENCAGE_KEY")
 
 # ── Per-session state (in-memory; resets on server restart) ────
 _session = {
@@ -41,9 +43,9 @@ _session = {
 # ── Conversational responses ──────────────────────────────────
 
 GREETINGS = [
-    "Hello! 👋 I'm HotelBot, your personal hotel booking assistant! I can help you find the perfect hotel anywhere in the world. Just tell me a city, like **'hotels in Mumbai'** or **'find hotels in Paris'** and I'll get right on it! 🏨",
-    "Hey there! 😊 Welcome to HotelBot! I'm here to help you discover amazing hotels. Try saying something like **'hotels in Delhi'** or **'show me hotels in Goa'** to get started!",
-    "Hi! 🙌 Great to meet you! I'm your AI hotel assistant. Tell me which city you'd like to explore and I'll find the best hotels for you. For example: **'hotels in Bangalore'** ✨",
+    "Hello! 👋 I'm **HotelBot**, your personal hotel booking assistant!\n\nI can help you find hotels in any city with **real contact details** — phone numbers, websites, and addresses sourced from OpenStreetMap.\n\nTry saying: **'hotels in Mumbai'** or **'find hotels in Jalandhar'** 🏨",
+    "Hey there! 😊 Welcome to **HotelBot**!\n\nI search real hotel data to find nearby hotels with contact details for direct booking.\n\nJust tell me a city like **'hotels in Delhi'** or **'show me hotels in Goa'** to get started!",
+    "Hi! 🙌 I'm your AI hotel assistant!\n\nI can find hotels anywhere with their **addresses, phone numbers, and websites** so you can book directly.\n\nTell me a city to explore — e.g. **'hotels in Bangalore'** ✨",
 ]
 
 THANKS_RESPONSES = [
@@ -57,18 +59,18 @@ HELP_TEXT = (
     "🔍 **Search Hotels:**\n"
     "  • 'hotels in Mumbai'\n"
     "  • 'find hotels in Paris'\n"
-    "  • 'show me hotels in Delhi'\n\n"
+    "  • 'show me hotels in Jalandhar'\n\n"
     "📊 **Sort Results:**\n"
-    "  • 'sort by price' or 'cheapest'\n"
-    "  • 'sort by rating' or 'best rated'\n\n"
+    "  • 'sort by rating'\n"
+    "  • 'sort by distance' or 'nearest'\n\n"
     "🔎 **Filter Results:**\n"
-    "  • 'price under 3000'\n"
-    "  • 'price between 1000 and 5000'\n"
-    "  • 'rating above 8'\n"
+    "  • 'rating above 3'\n"
     "  • 'within 5 km'\n\n"
     "📋 **Hotel Details:**\n"
     "  • 'tell me more about [hotel name]'\n"
     "  • 'show more results'\n\n"
+    "📞 **Contact Info:**\n"
+    "  Each result shows phone numbers, websites, and addresses when available!\n\n"
     "Just type naturally and I'll understand! 😊"
 )
 
@@ -80,14 +82,14 @@ GOODBYE_RESPONSES = [
 
 
 def is_greeting(text: str) -> bool:
-    greetings = ["hi", "hii", "hiii", "hello", "hey", "hola", "namaste", "yo", "sup", 
+    greetings = ["hi", "hii", "hiii", "hello", "hey", "hola", "namaste", "yo", "sup",
                  "good morning", "good afternoon", "good evening", "good night",
                  "what's up", "whats up", "howdy", "greetings"]
     return any(text.strip().lower().startswith(g) for g in greetings) or text.strip().lower() in greetings
 
 
 def is_thanks(text: str) -> bool:
-    thanks = ["thank", "thanks", "thx", "ty", "appreciate", "grateful", "awesome", "great", "nice", "cool", "perfect"]
+    thanks = ["thank", "thanks", "thx", "ty", "appreciate", "grateful", "awesome", "great job", "nice work", "perfect"]
     return any(t in text.lower() for t in thanks)
 
 
@@ -109,9 +111,8 @@ def is_about(text: str) -> bool:
 # ── Intent helpers ────────────────────────────────────────────
 
 def extract_city(text: str) -> str | None:
-    # Multiple patterns for natural language
     patterns = [
-        r"hotels?\s+in\s+([a-zA-Z\s]+?)(?:\s*$|\s+(?:for|from|with|under|between|above|sort|price|cheap|best))",
+        r"hotels?\s+in\s+([a-zA-Z\s]+?)(?:\s*$|\s+(?:for|from|with|under|between|above|sort|price|cheap|best|near))",
         r"hotels?\s+in\s+([a-zA-Z\s]+)",
         r"find\s+(?:me\s+)?hotels?\s+in\s+([a-zA-Z\s]+)",
         r"search\s+(?:for\s+)?hotels?\s+in\s+([a-zA-Z\s]+)",
@@ -119,34 +120,15 @@ def extract_city(text: str) -> str | None:
         r"(?:i\s+)?(?:want|need|looking\s+for)\s+(?:a\s+)?hotels?\s+in\s+([a-zA-Z\s]+)",
         r"book\s+(?:a\s+)?hotels?\s+in\s+([a-zA-Z\s]+)",
         r"stay\s+in\s+([a-zA-Z\s]+)",
+        r"hotels?\s+(?:near|around|at)\s+([a-zA-Z\s]+)",
     ]
     for pattern in patterns:
         m = re.search(pattern, text, re.IGNORECASE)
         if m:
             city = m.group(1).strip().title()
-            # Clean up trailing common words
             city = re.sub(r'\s+(Please|Thanks|Thank|For|From|With)$', '', city, flags=re.IGNORECASE)
             if len(city) > 1:
                 return city
-    return None
-
-
-def extract_price_range(text: str) -> tuple[float, float] | None:
-    m = re.search(r"between\s+(\d+)\s+and\s+(\d+)", text, re.IGNORECASE)
-    if m:
-        return float(m.group(1)), float(m.group(2))
-    m = re.search(r"under\s+(\d+)", text, re.IGNORECASE)
-    if m:
-        return 0.0, float(m.group(1))
-    m = re.search(r"(?:below|less\s+than|cheaper\s+than|max)\s+(\d+)", text, re.IGNORECASE)
-    if m:
-        return 0.0, float(m.group(1))
-    m = re.search(r"above\s+(\d+)", text, re.IGNORECASE)
-    if m:
-        return float(m.group(1)), float("inf")
-    m = re.search(r"(?:over|more\s+than|min(?:imum)?)\s+(\d+)", text, re.IGNORECASE)
-    if m:
-        return float(m.group(1)), float("inf")
     return None
 
 
@@ -171,36 +153,37 @@ def find_hotel_by_name(name_fragment: str) -> dict | None:
 
 def handle_message(user_input: str) -> str:
     text = user_input.strip().lower()
-    
-    if not RAPIDAPI_KEY:
-        return "❌ Error: API Key missing! The RAPIDAPI_KEY environment variable is not set on the server."
+
+    if not OPENCAGE_KEY:
+        return "❌ Error: OPENCAGE_KEY environment variable is not set on the server."
 
     # ── Conversational intents (check first) ──
     if is_greeting(text):
         return random.choice(GREETINGS)
-    
+
     if is_goodbye(text):
         return random.choice(GOODBYE_RESPONSES)
-    
+
     if is_help(text):
         return HELP_TEXT
-    
+
     if is_about(text):
         return (
             "I'm **HotelBot** 🤖 — your AI-powered hotel booking assistant!\n\n"
-            "I can search for hotels in any city worldwide, filter by price and rating, "
-            "sort results, and give you detailed information about any hotel.\n\n"
-            "I'm powered by the Booking.com API and I'm here to make your hotel search "
-            "quick and easy! Just tell me a city to get started. 🏨"
+            "I search real hotel data from **OpenStreetMap** to find nearby hotels "
+            "with their contact details — phone numbers, websites, email addresses, "
+            "and exact locations.\n\n"
+            "This means you get **real, verified hotel data** that you can use to book directly! "
+            "Just tell me a city to get started. 🏨"
         )
-    
+
     if is_thanks(text):
         return random.choice(THANKS_RESPONSES)
 
     # ── Hotel search ──
     city = extract_city(user_input)
     if city:
-        result = search_hotels(city, RAPIDAPI_KEY, RAPIDAPI_HOST)
+        result = search_hotels(city, OPENCAGE_KEY)
         if result.get("error"):
             return f"❌ {result['error']}"
         _session["hotels"] = result["result"]
@@ -209,45 +192,38 @@ def handle_message(user_input: str) -> str:
         return (
             f"🏙️ **Found {count} hotels in {city}!** Here are the top results:\n\n"
             + format_hotel_list(_session["hotels"])
-            + f"\n\n💡 **Tip:** You can say 'sort by price', 'rating above 8', or 'tell me more about [hotel name]' to explore further!"
+            + f"\n\n💡 **Tip:** Say 'sort by distance', 'within 5 km', 'show more', or 'tell me more about [hotel name]' to explore!"
         )
 
     # ── Commands that need previous search results ──
     if not _session["hotels"]:
-        # Smart fallback - try to understand what the user wants
         if any(word in text for word in ["hotel", "book", "stay", "room", "accommodation"]):
             return (
                 "I'd love to help you find a hotel! 🏨\n\n"
-                "Just tell me the city you're interested in. For example:\n"
+                "Just tell me the city. For example:\n"
                 "  • **'hotels in Mumbai'**\n"
                 "  • **'find hotels in Goa'**\n"
-                "  • **'show me hotels in Delhi'**"
+                "  • **'hotels near Jalandhar'**"
             )
         return (
-            "Hey! 😊 I'm HotelBot, your hotel booking assistant.\n\n"
-            "To get started, just tell me which city you'd like to explore!\n"
+            "Hey! 😊 I'm **HotelBot**, your hotel booking assistant.\n\n"
+            "To get started, tell me which city you'd like to explore!\n"
             "For example: **'hotels in Mumbai'** or **'hotels in Paris'**\n\n"
             "Type **'help'** to see everything I can do! 🏨"
         )
 
     # Sorting
-    if "sort by price" in text or "cheapest" in text or "cheap" in text or "lowest price" in text:
-        _session["hotels"] = sort_by_price(_session["hotels"])
-        return "✅ **Sorted by price (lowest first):**\n\n" + format_hotel_list(_session["hotels"])
+    if "sort by distance" in text or "nearest" in text or "closest" in text:
+        _session["hotels"] = sort_by_distance(_session["hotels"])
+        return "✅ **Sorted by distance (nearest first):**\n\n" + format_hotel_list(_session["hotels"])
 
-    if "sort by rating" in text or "best rated" in text or "top rated" in text or "highest rated" in text:
+    if "sort by rating" in text or "best rated" in text or "top rated" in text:
         _session["hotels"] = sort_by_rating(_session["hotels"])
         return "✅ **Sorted by rating (highest first):**\n\n" + format_hotel_list(_session["hotels"])
 
-    # Price filter
-    price_range = extract_price_range(text)
-    if price_range:
-        lo, hi = price_range
-        filtered = filter_by_price(_session["hotels"], lo, hi)
-        if not filtered:
-            return f"😕 No hotels found in that price range. Try a wider range or say **'show all'** to see all results."
-        _session["hotels"] = filtered
-        return f"✅ **{len(filtered)} hotel(s) match your budget:**\n\n" + format_hotel_list(filtered)
+    if "sort by price" in text or "cheapest" in text:
+        _session["hotels"] = sort_by_price(_session["hotels"])
+        return "✅ **Sorted by price:**\n\n" + format_hotel_list(_session["hotels"])
 
     # Rating filter
     min_rating = extract_rating(text)
@@ -256,14 +232,14 @@ def handle_message(user_input: str) -> str:
         if not filtered:
             return f"😕 No hotels with rating ≥ {min_rating}. Try a lower threshold."
         _session["hotels"] = filtered
-        return f"✅ **{len(filtered)} hotel(s) rated {min_rating}+:**\n\n" + format_hotel_list(filtered)
+        return f"✅ **{len(filtered)} hotel(s) rated {min_rating}+ stars:**\n\n" + format_hotel_list(filtered)
 
     # Distance filter
     max_km = extract_distance(text)
     if max_km is not None:
         filtered = filter_by_distance(_session["hotels"], max_km)
         _session["hotels"] = filtered
-        return f"✅ **Hotels within {max_km} km:**\n\n" + format_hotel_list(filtered)
+        return f"✅ **Hotels within {max_km} km of city center:**\n\n" + format_hotel_list(filtered)
 
     # Detail view
     if "tell me more" in text or "details" in text or "more about" in text or "info about" in text:
@@ -276,22 +252,35 @@ def handle_message(user_input: str) -> str:
         return "Please specify the hotel name, e.g. **'tell me more about Taj Hotel'**."
 
     if "show more" in text or "more results" in text or "show all" in text:
-        return "📋 **All results:**\n\n" + format_hotel_list(_session["hotels"], limit=10)
+        return "📋 **More results:**\n\n" + format_hotel_list(_session["hotels"], limit=10)
+
+    # Contact specific hotel
+    if "phone" in text or "call" in text or "contact" in text or "number" in text:
+        if "phone" in text or "number" in text:
+            m = re.search(r"(?:phone|number|contact)\s+(?:of|for)\s+(.+)", user_input, re.IGNORECASE)
+            if m:
+                hotel = find_hotel_by_name(m.group(1).strip())
+                if hotel:
+                    phone = hotel.get("phone")
+                    if phone:
+                        return f"📞 **{hotel['hotel_name']}**: {phone}"
+                    return f"😕 No phone number available for {hotel['hotel_name']}. Try searching for it on Google Maps."
+        return "To get contact details, say **'tell me more about [hotel name]'** or search for a specific hotel."
 
     # New search suggestion
-    if any(word in text for word in ["hotel", "book", "stay", "room", "another", "different", "new"]):
+    if any(word in text for word in ["hotel", "book", "stay", "another", "different", "new"]):
         return (
             "Sure! Just tell me the city name. For example:\n"
             "  • **'hotels in Goa'**\n"
             "  • **'hotels in London'**"
         )
 
-    # Catch-all with personality
+    # Catch-all
     return (
         f"🤔 I'm not sure I understand that. Here's what I can do:\n\n"
         f"🔍 Search: **'hotels in [city]'**\n"
-        f"📊 Sort: **'sort by price'** or **'sort by rating'**\n"
-        f"💰 Filter: **'price under 3000'** or **'rating above 8'**\n"
+        f"📊 Sort: **'sort by distance'** or **'sort by rating'**\n"
+        f"🔎 Filter: **'within 5 km'** or **'rating above 3'**\n"
         f"📋 Details: **'tell me more about [hotel name]'**\n\n"
         f"Type **'help'** for the full guide! 😊"
     )

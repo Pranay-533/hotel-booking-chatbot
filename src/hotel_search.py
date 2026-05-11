@@ -1,231 +1,221 @@
 """
-hotel_search.py  –  Booking.com API (booking-com15.p.rapidapi.com)
+hotel_search.py  –  Hotel search using OpenCage Geocoding + Overpass API (OpenStreetMap)
 
 Flow:
-  1. get_dest_id(city)  →  calls /api/v1/hotels/searchDestination
-  2. search_hotels(city) → calls get_dest_id(), then /api/v1/hotels/searchHotels
-                            returns {"result": [...normalized hotels...]}
+  1. get_coordinates(city) → Uses OpenCage to convert city name to lat/lon
+  2. search_hotels(city)   → Uses Overpass API to find hotels near those coordinates
+                              Returns {"result": [...normalized hotels...]}
+
+Overpass API is completely FREE with no API key required.
+It queries OpenStreetMap data which includes hotel names, addresses,
+phone numbers, websites, star ratings, and more.
 """
 
 import re
 import requests
-from datetime import datetime, timedelta
+import math
+from src.coordinates import get_coordinates
 
 
 # ──────────────────────────────────────────────
-# Step 1 – City  →  dest_id
+# Overpass API – query OpenStreetMap for hotels
 # ──────────────────────────────────────────────
 
-def get_dest_id(city: str, rapidapi_key: str, rapidapi_host: str) -> dict | None:
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+
+
+def _query_overpass(lat: float, lon: float, radius_m: int = 15000) -> list[dict]:
     """
-    Translate a city name into a Booking.com dest_id.
-    Returns {"dest_id": ..., "search_type": ...} or None on failure.
+    Query Overpass API for hotels, guest houses, motels, and resorts
+    within `radius_m` metres of (lat, lon).
     """
-    url = f"https://{rapidapi_host}/api/v1/hotels/searchDestination"
+    query = (
+        f'[out:json][timeout:25];'
+        f'('
+        f'node["tourism"="hotel"](around:{radius_m},{lat},{lon});'
+        f'way["tourism"="hotel"](around:{radius_m},{lat},{lon});'
+        f'node["tourism"="guest_house"](around:{radius_m},{lat},{lon});'
+        f'way["tourism"="guest_house"](around:{radius_m},{lat},{lon});'
+        f'node["tourism"="motel"](around:{radius_m},{lat},{lon});'
+        f'way["tourism"="motel"](around:{radius_m},{lat},{lon});'
+        f');out center body;'
+    )
+
     headers = {
-        "X-RapidAPI-Key": rapidapi_key,
-        "X-RapidAPI-Host": rapidapi_host,
+        "User-Agent": "HotelBot/1.0 (hotel booking chatbot)",
+        "Accept": "application/json",
     }
-    params = {"query": city}
 
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+    # Try primary and fallback Overpass servers
+    servers = [
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
+    ]
 
-        results = data.get("data", [])
-        if not results:
-            return None
-
-        # Prefer a CITY type match
-        city_result = next(
-            (r for r in results if r.get("search_type") == "city"),
-            results[0]
-        )
-        return {
-            "dest_id": city_result.get("dest_id"),
-            "search_type": city_result.get("search_type", "city"),
-        }
-
-    except Exception as e:
-        print(f"[hotel_search] get_dest_id error: {e}")
-        return None
-
-
-# ──────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────
-
-def _parse_price(raw) -> float | None:
-    """Extract a numeric price from various formats."""
-    if raw is None:
-        return None
-    if isinstance(raw, (int, float)):
-        return float(raw)
-    if isinstance(raw, str):
-        digits = re.sub(r"[^\d.]", "", raw)
+    for server_url in servers:
         try:
-            return float(digits) if digits else None
+            response = requests.get(
+                server_url,
+                params={"data": query},
+                headers=headers,
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+            elements = data.get("elements", [])
+            if elements:
+                return elements
+        except Exception as e:
+            print(f"[hotel_search] Overpass API error ({server_url}): {e}")
+            continue
+
+    return []
+
+
+# ──────────────────────────────────────────────
+# Distance calculation (Haversine)
+# ──────────────────────────────────────────────
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate distance in km between two lat/lon points."""
+    R = 6371  # Earth's radius in km
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(lat1))
+         * math.cos(math.radians(lat2))
+         * math.sin(dlon / 2) ** 2)
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+# ──────────────────────────────────────────────
+# Normalize OSM data into our hotel format
+# ──────────────────────────────────────────────
+
+def _parse_stars(tags: dict) -> float | None:
+    """Extract star rating from OSM tags."""
+    stars = tags.get("stars")
+    if stars:
+        m = re.search(r"(\d+(?:\.\d+)?)", str(stars))
+        if m:
+            return float(m.group(1))
+    star_rating = tags.get("star_rating")
+    if star_rating:
+        try:
+            return float(star_rating)
         except ValueError:
-            return None
+            pass
     return None
 
 
-def _parse_rating(raw) -> float | None:
-    """Extract a numeric rating safely."""
-    if raw is None:
-        return None
-    if isinstance(raw, (int, float)):
-        return float(raw)
-    if isinstance(raw, dict):
-        try:
-            return float(raw.get("score", 0) or raw.get("rating", 0) or 0) or None
-        except (ValueError, TypeError):
-            return None
-    try:
-        return float(raw)
-    except (ValueError, TypeError):
-        return None
+def _normalize_hotel(element: dict, city_lat: float, city_lon: float) -> dict:
+    """Convert an OSM element into the chatbot's standard hotel dict."""
+    tags = element.get("tags", {})
 
+    # Get coordinates (node has lat/lon directly; way has center)
+    lat = element.get("lat") or element.get("center", {}).get("lat")
+    lon = element.get("lon") or element.get("center", {}).get("lon")
 
-def _normalize_hotel(h: dict) -> dict:
-    """
-    Flatten a raw Booking.com property dict into the shape the rest of
-    the chatbot expects.
-    """
-    # Try multiple price paths
-    price = None
-    price_fmt = "Price unavailable"
-    
-    # Path 1: property.priceBreakdown.grossPrice
-    pb = h.get("property", {}).get("priceBreakdown", {})
-    gross = pb.get("grossPrice", {})
-    if gross:
-        price = _parse_price(gross.get("value"))
-        price_fmt = gross.get("currency", "INR") + " " + str(int(price)) if price else "Price unavailable"
-    
-    # Path 2: direct price fields
-    if price is None:
-        price = _parse_price(h.get("min_total_price") or h.get("price") or h.get("composite_price_breakdown", {}).get("gross_amount_per_night", {}).get("value"))
-    
-    if price is None:
-        price = _parse_price(h.get("property", {}).get("price"))
-    
-    if price and price_fmt == "Price unavailable":
-        currency = h.get("property", {}).get("currency", "INR")
-        price_fmt = f"{currency} {int(price)}"
-
-    # Rating
-    rating = _parse_rating(
-        h.get("property", {}).get("reviewScore") 
-        or h.get("review_score") 
-        or h.get("property", {}).get("reviewScoreWord")
-    )
-
-    # Name
-    name = (
-        h.get("property", {}).get("name") 
-        or h.get("hotel_name") 
-        or h.get("name", "Unknown Hotel")
-    )
-
-    # Address / location
-    address = h.get("property", {}).get("wishlistName") or h.get("address") or None
-
-    # Distance
-    dist_str = h.get("property", {}).get("distanceFromCenter")
+    # Calculate distance from city center
     distance = None
-    if dist_str:
-        d_match = re.search(r"([\d.]+)", str(dist_str))
-        if d_match:
-            distance = float(d_match.group(1))
+    if lat and lon:
+        distance = round(_haversine_km(city_lat, city_lon, lat, lon), 1)
+
+    # Build address
+    addr_parts = []
+    for key in ["addr:street", "addr:housenumber", "addr:suburb", "addr:city", "addr:postcode"]:
+        val = tags.get(key)
+        if val:
+            addr_parts.append(val)
+    address = ", ".join(addr_parts) if addr_parts else tags.get("addr:full", None)
+
+    # Phone & website
+    phone = tags.get("phone") or tags.get("contact:phone") or tags.get("contact:mobile")
+    website = tags.get("website") or tags.get("contact:website") or tags.get("url")
+    email = tags.get("email") or tags.get("contact:email")
+
+    # Star rating
+    stars = _parse_stars(tags)
+
+    # Tourism type
+    tourism_type = tags.get("tourism", "hotel").replace("_", " ").title()
 
     return {
-        "hotel_name": name,
-        "review_score": rating,
-        "min_total_price": price,
-        "price_formatted": price_fmt,
-        "currencycode": h.get("property", {}).get("currency", "INR"),
+        "hotel_name": tags.get("name", "Unnamed Hotel"),
+        "review_score": stars,  # OSM star rating (1-5 scale)
+        "min_total_price": None,  # OSM doesn't have price data
+        "price_formatted": "Contact hotel for pricing",
+        "currencycode": "INR",
         "address": address,
-        "accommodation_type_name": h.get("property", {}).get("propertyType", "Hotel"),
+        "accommodation_type_name": tourism_type,
         "distance": distance,
-        "hotel_id": h.get("property", {}).get("id") or h.get("hotel_id"),
+        "hotel_id": element.get("id"),
+        "phone": phone,
+        "website": website,
+        "email": email,
+        "lat": lat,
+        "lon": lon,
     }
 
 
 # ──────────────────────────────────────────────
-# Step 2 – Main search entry point
+# Main search entry point
 # ──────────────────────────────────────────────
 
 def search_hotels(
     city: str,
-    rapidapi_key: str,
-    rapidapi_host: str,
+    opencage_key: str,
+    _unused_host: str = "",
     checkin_date: str | None = None,
     checkout_date: str | None = None,
     adults_number: int = 2,
 ) -> dict:
     """
-    Search for hotels in *city* using the Booking.com API.
+    Search for hotels in *city* using OpenCage geocoding + Overpass API.
+
+    Parameters
+    ----------
+    city          : e.g. "Delhi", "Mumbai", "Jalandhar"
+    opencage_key  : OpenCage API key for geocoding
 
     Returns
     -------
     {"result": [<normalized hotel dicts>]}          on success
     {"error": "<message>", "result": []}            on failure
     """
-    # Default dates: tomorrow → day after
-    today = datetime.today()
-    if not checkin_date:
-        checkin_date = (today + timedelta(days=1)).strftime("%Y-%m-%d")
-    if not checkout_date:
-        checkout_date = (today + timedelta(days=2)).strftime("%Y-%m-%d")
-
-    # ── Step 1: resolve city → dest_id
-    dest_info = get_dest_id(city, rapidapi_key, rapidapi_host)
-    if not dest_info:
+    # Step 1: Geocode the city
+    lat, lon = get_coordinates(city, opencage_key)
+    if lat is None or lon is None:
         return {
-            "error": f"Could not find a region for '{city}'. Try a different city name.",
+            "error": f"Could not find location '{city}'. Please check the city name and try again.",
             "result": [],
         }
 
-    # ── Step 2: search hotels
-    url = f"https://{rapidapi_host}/api/v1/hotels/searchHotels"
-    headers = {
-        "X-RapidAPI-Key": rapidapi_key,
-        "X-RapidAPI-Host": rapidapi_host,
-    }
-    params = {
-        "dest_id": dest_info["dest_id"],
-        "search_type": dest_info["search_type"],
-        "arrival_date": checkin_date,
-        "departure_date": checkout_date,
-        "adults": str(adults_number),
-        "room_qty": "1",
-        "page_number": "1",
-        "units": "metric",
-        "temperature_unit": "c",
-        "languagecode": "en-us",
-        "currency_code": "INR",
-    }
+    # Step 2: Query Overpass for hotels
+    raw_hotels = _query_overpass(lat, lon, radius_m=15000)
 
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=15)
-        response.raise_for_status()
-        data = response.json()
+    if not raw_hotels:
+        # Try with a larger radius
+        raw_hotels = _query_overpass(lat, lon, radius_m=30000)
 
-        raw_hotels = data.get("data", {}).get("hotels", [])
-        if not raw_hotels:
-            return {
-                "error": f"No hotels found for '{city}' on those dates.",
-                "result": [],
-            }
+    if not raw_hotels:
+        return {
+            "error": f"No hotels found near '{city}'. Try a larger city or different spelling.",
+            "result": [],
+        }
 
-        normalized = [_normalize_hotel(h) for h in raw_hotels]
-        return {"result": normalized}
+    # Normalize and filter out unnamed hotels
+    normalized = []
+    for h in raw_hotels:
+        hotel = _normalize_hotel(h, lat, lon)
+        if hotel["hotel_name"] != "Unnamed Hotel":
+            normalized.append(hotel)
 
-    except requests.exceptions.HTTPError as e:
-        return {"error": f"API HTTP error: {e}", "result": []}
-    except requests.exceptions.Timeout:
-        return {"error": "Request timed out. Please try again.", "result": []}
-    except Exception as e:
-        return {"error": f"Unexpected error: {e}", "result": []}
+    # If all are unnamed, include them anyway
+    if not normalized:
+        normalized = [_normalize_hotel(h, lat, lon) for h in raw_hotels]
+
+    # Sort by distance from city center
+    normalized.sort(key=lambda h: h.get("distance") or 999)
+
+    return {"result": normalized}
