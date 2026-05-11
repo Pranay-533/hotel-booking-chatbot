@@ -8,7 +8,7 @@ services:
       - key: RAPIDAPI_KEY
         sync: false
       - key: RAPIDAPI_HOST
-        value: hotels-com-provider.p.rapidapi.com
+        value: booking-com15.p.rapidapi.com
       - key: OPENCAGE_KEY
         sync: false
       - key: PORT

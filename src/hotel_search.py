@@ -1,10 +1,10 @@
 """
-hotel_search.py  –  Hotels.com Provider API (hotels-com-provider.p.rapidapi.com)
+hotel_search.py  –  Booking.com API (booking-com15.p.rapidapi.com)
 
 Flow:
-  1. get_region_id(city)  →  calls /v2/regions to turn a city name into a region_id
-  2. search_hotels(city)  →  calls get_region_id(), then /v3/hotels/search
-                              returns {"result": [...normalized hotels...]}
+  1. get_dest_id(city)  →  calls /api/v1/hotels/searchDestination
+  2. search_hotels(city) → calls get_dest_id(), then /api/v1/hotels/searchHotels
+                            returns {"result": [...normalized hotels...]}
 """
 
 import re
@@ -13,25 +13,20 @@ from datetime import datetime, timedelta
 
 
 # ──────────────────────────────────────────────
-# Step 1 – City  →  region_id
+# Step 1 – City  →  dest_id
 # ──────────────────────────────────────────────
 
-def get_region_id(city: str, rapidapi_key: str, rapidapi_host: str) -> str | None:
+def get_dest_id(city: str, rapidapi_key: str, rapidapi_host: str) -> dict | None:
     """
-    Translate a city name into a Hotels.com region_id (gaiaId).
-    Prefers a result with type == 'CITY'; falls back to the first result.
-    Returns the region_id string, or None on failure.
+    Translate a city name into a Booking.com dest_id.
+    Returns {"dest_id": ..., "search_type": ...} or None on failure.
     """
-    url = f"https://{rapidapi_host}/v2/regions"
+    url = f"https://{rapidapi_host}/api/v1/hotels/searchDestination"
     headers = {
         "X-RapidAPI-Key": rapidapi_key,
         "X-RapidAPI-Host": rapidapi_host,
     }
-    params = {
-        "query": city,
-        "locale": "en_IN",
-        "domain": "IN",
-    }
+    params = {"query": city}
 
     try:
         response = requests.get(url, headers=headers, params=params, timeout=10)
@@ -42,15 +37,18 @@ def get_region_id(city: str, rapidapi_key: str, rapidapi_host: str) -> str | Non
         if not results:
             return None
 
-        # Prefer an exact CITY match, fall back to first result
+        # Prefer a CITY type match
         city_result = next(
-            (r for r in results if r.get("type") == "CITY"),
+            (r for r in results if r.get("search_type") == "city"),
             results[0]
         )
-        return city_result["gaiaId"]
+        return {
+            "dest_id": city_result.get("dest_id"),
+            "search_type": city_result.get("search_type", "city"),
+        }
 
     except Exception as e:
-        print(f"[hotel_search] get_region_id error: {e}")
+        print(f"[hotel_search] get_dest_id error: {e}")
         return None
 
 
@@ -58,56 +56,30 @@ def get_region_id(city: str, rapidapi_key: str, rapidapi_host: str) -> str | Non
 # Helpers
 # ──────────────────────────────────────────────
 
-def _parse_price(formatted: str) -> float | None:
-    """
-    Turn a formatted price string like '₹1,234' or 'INR 1234' into a float.
-    Returns None if parsing fails.
-    """
-    if not formatted:
+def _parse_price(raw) -> float | None:
+    """Extract a numeric price from various formats."""
+    if raw is None:
         return None
-    # Strip everything that isn't a digit or decimal point
-    digits = re.sub(r"[^\d.]", "", formatted)
-    try:
-        return float(digits) if digits else None
-    except ValueError:
-        return None
-
-
-def _extract_lead_price(hotel: dict) -> tuple[float | None, str]:
-    """
-    Pull the LEAD (current) price from the nested price structure.
-    Returns (price_float, formatted_string).
-    """
-    try:
-        display_prices = (
-            hotel["price"]["priceSummary"]["displayPrices"]
-        )
-        lead = next(
-            (d for d in display_prices if d.get("role") == "LEAD"),
-            display_prices[0] if display_prices else None,
-        )
-        if lead:
-            fmt = lead["price"]["formatted"]
-            return _parse_price(fmt), fmt
-    except (KeyError, TypeError):
-        pass
-    return None, ""
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, str):
+        digits = re.sub(r"[^\d.]", "", raw)
+        try:
+            return float(digits) if digits else None
+        except ValueError:
+            return None
+    return None
 
 
 def _parse_rating(raw) -> float | None:
-    """
-    The Hotels.com v3 API returns guestRating as either:
-      - None / missing
-      - a dict like {'rating': '5.6', 'ratingText': '5.6 out of 10', ...}
-    Extract the numeric value safely.
-    """
+    """Extract a numeric rating safely."""
     if raw is None:
         return None
     if isinstance(raw, (int, float)):
         return float(raw)
     if isinstance(raw, dict):
         try:
-            return float(raw.get("rating", 0) or 0) or None
+            return float(raw.get("score", 0) or raw.get("rating", 0) or 0) or None
         except (ValueError, TypeError):
             return None
     try:
@@ -118,21 +90,66 @@ def _parse_rating(raw) -> float | None:
 
 def _normalize_hotel(h: dict) -> dict:
     """
-    Flatten a raw Hotels.com v3 property dict into the shape the rest of
+    Flatten a raw Booking.com property dict into the shape the rest of
     the chatbot expects.
     """
-    price_float, price_fmt = _extract_lead_price(h)
+    # Try multiple price paths
+    price = None
+    price_fmt = "Price unavailable"
+    
+    # Path 1: property.priceBreakdown.grossPrice
+    pb = h.get("property", {}).get("priceBreakdown", {})
+    gross = pb.get("grossPrice", {})
+    if gross:
+        price = _parse_price(gross.get("value"))
+        price_fmt = gross.get("currency", "INR") + " " + str(int(price)) if price else "Price unavailable"
+    
+    # Path 2: direct price fields
+    if price is None:
+        price = _parse_price(h.get("min_total_price") or h.get("price") or h.get("composite_price_breakdown", {}).get("gross_amount_per_night", {}).get("value"))
+    
+    if price is None:
+        price = _parse_price(h.get("property", {}).get("price"))
+    
+    if price and price_fmt == "Price unavailable":
+        currency = h.get("property", {}).get("currency", "INR")
+        price_fmt = f"{currency} {int(price)}"
+
+    # Rating
+    rating = _parse_rating(
+        h.get("property", {}).get("reviewScore") 
+        or h.get("review_score") 
+        or h.get("property", {}).get("reviewScoreWord")
+    )
+
+    # Name
+    name = (
+        h.get("property", {}).get("name") 
+        or h.get("hotel_name") 
+        or h.get("name", "Unknown Hotel")
+    )
+
+    # Address / location
+    address = h.get("property", {}).get("wishlistName") or h.get("address") or None
+
+    # Distance
+    dist_str = h.get("property", {}).get("distanceFromCenter")
+    distance = None
+    if dist_str:
+        d_match = re.search(r"([\d.]+)", str(dist_str))
+        if d_match:
+            distance = float(d_match.group(1))
 
     return {
-        "hotel_name": h.get("name", "Unknown Hotel"),
-        "review_score": _parse_rating(h.get("guestRating")),  # float or None
-        "min_total_price": price_float,                        # float or None
-        "price_formatted": price_fmt,                          # e.g. "₹1,234"
-        "currencycode": "INR",
-        "address": (h.get("messages") or [None])[0],          # first message = city/area
-        "accommodation_type_name": "Hotel",
-        "distance": None,   # v3 API does not return distance from centre
-        "hotel_id": h.get("id"),
+        "hotel_name": name,
+        "review_score": rating,
+        "min_total_price": price,
+        "price_formatted": price_fmt,
+        "currencycode": h.get("property", {}).get("currency", "INR"),
+        "address": address,
+        "accommodation_type_name": h.get("property", {}).get("propertyType", "Hotel"),
+        "distance": distance,
+        "hotel_id": h.get("property", {}).get("id") or h.get("hotel_id"),
     }
 
 
@@ -149,51 +166,46 @@ def search_hotels(
     adults_number: int = 2,
 ) -> dict:
     """
-    Search for hotels in *city* using the Hotels.com Provider API.
-
-    Parameters
-    ----------
-    city            : e.g. "Delhi", "Mumbai"
-    rapidapi_key    : your RapidAPI key
-    rapidapi_host   : "hotels-com-provider.p.rapidapi.com"
-    checkin_date    : "YYYY-MM-DD"  (defaults to today)
-    checkout_date   : "YYYY-MM-DD"  (defaults to tomorrow)
-    adults_number   : number of adult guests
+    Search for hotels in *city* using the Booking.com API.
 
     Returns
     -------
     {"result": [<normalized hotel dicts>]}          on success
     {"error": "<message>", "result": []}            on failure
     """
-    # Default dates: today → tomorrow
+    # Default dates: tomorrow → day after
     today = datetime.today()
     if not checkin_date:
-        checkin_date = today.strftime("%Y-%m-%d")
+        checkin_date = (today + timedelta(days=1)).strftime("%Y-%m-%d")
     if not checkout_date:
-        checkout_date = (today + timedelta(days=1)).strftime("%Y-%m-%d")
+        checkout_date = (today + timedelta(days=2)).strftime("%Y-%m-%d")
 
-    # ── Step 1: resolve city → region_id ──────────────────────────────
-    region_id = get_region_id(city, rapidapi_key, rapidapi_host)
-    if not region_id:
+    # ── Step 1: resolve city → dest_id
+    dest_info = get_dest_id(city, rapidapi_key, rapidapi_host)
+    if not dest_info:
         return {
             "error": f"Could not find a region for '{city}'. Try a different city name.",
             "result": [],
         }
 
-    # ── Step 2: search hotels ──────────────────────────────────────────
-    url = f"https://{rapidapi_host}/v3/hotels/search"
+    # ── Step 2: search hotels
+    url = f"https://{rapidapi_host}/api/v1/hotels/searchHotels"
     headers = {
         "X-RapidAPI-Key": rapidapi_key,
         "X-RapidAPI-Host": rapidapi_host,
     }
     params = {
-        "region_id": region_id,
-        "locale": "en_IN",
-        "checkin_date": checkin_date,
-        "checkout_date": checkout_date,
-        "adults_number": str(adults_number),
-        "domain": "IN",
-        "sort_order": "PRICE_LOW_TO_HIGH",
+        "dest_id": dest_info["dest_id"],
+        "search_type": dest_info["search_type"],
+        "arrival_date": checkin_date,
+        "departure_date": checkout_date,
+        "adults": str(adults_number),
+        "room_qty": "1",
+        "page_number": "1",
+        "units": "metric",
+        "temperature_unit": "c",
+        "languagecode": "en-us",
+        "currency_code": "INR",
     }
 
     try:
@@ -201,7 +213,7 @@ def search_hotels(
         response.raise_for_status()
         data = response.json()
 
-        raw_hotels = data.get("data", {}).get("properties", [])
+        raw_hotels = data.get("data", {}).get("hotels", [])
         if not raw_hotels:
             return {
                 "error": f"No hotels found for '{city}' on those dates.",
